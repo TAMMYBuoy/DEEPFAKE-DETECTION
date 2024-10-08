@@ -1,0 +1,192 @@
+!pip install tensorflow albumentations opencv-python scikit-learn matplotlib
+
+
+import numpy as np
+import cv2
+import os
+import albumentations as A
+from tensorflow.keras.utils import to_categorical
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from tensorflow.keras.preprocessing.image import img_to_array
+from sklearn.metrics import classification_report, accuracy_score
+import matplotlib.pyplot as plt
+
+
+augmentations = A.Compose([
+    A.Rotate(limit=10, p=0.5),
+    A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=10, p=0.5),
+    A.RandomBrightnessContrast(p=0.5),
+    A.GaussianBlur(p=0.3),
+    A.HorizontalFlip(p=0.5),
+    A.Resize(128, 128)  # Resize all images to (128, 128)
+])
+
+
+
+def load_images_for_person(person_name, dataset_dir='signature_dataset', augment=True):
+    """
+    Loads and preprocesses images for a specified person.
+
+    Parameters:
+    - person_name: Name of the person (corresponding to the directory name)
+    - dataset_dir: Root directory of the dataset
+    - augment: Whether to apply data augmentation
+
+    Returns:
+    - X_train, y_train: Training images and labels
+    - X_test, y_test: Testing images and labels
+    """
+    train_dir = os.path.join(dataset_dir, person_name, 'train')
+    test_dir = os.path.join(dataset_dir, person_name, 'test')
+    
+    # Load training data
+    X_train, y_train = load_images_with_augmentations(train_dir, augmentations, augment=augment)
+    
+    # Load testing data (without augmentation)
+    X_test, y_test = load_images_with_augmentations(test_dir, augmentations, augment=False)
+    
+    return X_train, y_train, X_test, y_test
+
+
+
+def load_images_with_augmentations(image_dir, augmentations, img_size=(128, 128), augment=True):
+    """
+    Loads images from a directory, applies augmentations, and preprocesses them.
+
+    Parameters:
+    - image_dir: Directory containing 'genuine' and 'forged' subdirectories
+    - augmentations: Albumentations augmentation pipeline
+    - img_size: Desired image size (width, height)
+    - augment: Whether to apply augmentations
+
+    Returns:
+    - images: Numpy array of preprocessed images
+    - labels: Numpy array of labels (0 for genuine, 1 for forged)
+    """
+    images = []
+    labels = []
+    
+    # Loop through the 'genuine' and 'forged' subdirectories
+    for label_dir in ['genuine', 'forged']:
+        label_path = os.path.join(image_dir, label_dir)
+        label = 0 if label_dir == 'genuine' else 1  # 0: genuine, 1: forged
+
+        if not os.path.exists(label_path):
+            print(f"Warning: Directory {label_path} does not exist.")
+            continue
+
+        for image_name in os.listdir(label_path):
+            image_path = os.path.join(label_path, image_name)
+            image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+
+            if image is not None:
+                # Apply Albumentations augmentations
+                if augment:
+                    augmented = augmentations(image=image)
+                    image = augmented['image']
+                else:
+                    # Ensure consistent resizing
+                    image = cv2.resize(image, img_size)
+
+                # Normalize the image to range [0, 1]
+                image = image / 255.0
+
+                # Expand dimensions to match Keras' expected input shape
+                image = np.expand_dims(image, axis=-1)  # Shape: (128, 128, 1)
+
+                images.append(image)
+                labels.append(label)
+
+    return np.array(images), np.array(labels)
+
+
+
+
+
+def create_cnn_model(input_shape=(128, 128, 1)):
+    """
+    Creates and compiles a CNN model.
+
+    Parameters:
+    - input_shape: Shape of the input images
+
+    Returns:
+    - model: Compiled CNN model
+    """
+    model = Sequential([
+        Conv2D(32, (3, 3), activation='relu', input_shape=input_shape),
+        MaxPooling2D(pool_size=(2, 2)),
+        Dropout(0.25),
+        
+        Conv2D(64, (3, 3), activation='relu'),
+        MaxPooling2D(pool_size=(2, 2)),
+        Dropout(0.25),
+        
+        Flatten(),
+        Dense(128, activation='relu'),
+        Dropout(0.5),
+        
+        Dense(1, activation='sigmoid')  # Binary classification (genuine vs forged)
+    ])
+    
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    model.summary()
+    
+    return model
+
+
+def train_and_evaluate(person_name, dataset_dir='signature_dataset', epochs=20, batch_size=32, save_model=False):
+    """
+    Trains and evaluates the CNN model for a specific person.
+
+    Parameters:
+    - person_name: Name of the person (directory name)
+    - dataset_dir: Root directory of the dataset
+    - epochs: Number of training epochs
+    - batch_size: Size of the training batches
+    - save_model: Whether to save the trained model
+
+    Returns:
+    - history: Training history object
+    - model: Trained Keras model
+    - metrics: Evaluation metrics (accuracy, classification report)
+    """
+    # Load data
+    X_train, y_train, X_test, y_test = load_images_for_person(person_name, dataset_dir=dataset_dir, augment=True)
+    
+    print(f"Person: {person_name}")
+    print(f"Training samples: {X_train.shape[0]}, Testing samples: {X_test.shape[0]}")
+    
+    # Create the model
+    model = create_cnn_model(input_shape=(128, 128, 1))
+    
+    # Train the model
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_test, y_test),
+        batch_size=batch_size,
+        epochs=epochs
+    )
+    
+    # Evaluate the model
+    y_pred = model.predict(X_test)
+    y_pred = (y_pred > 0.5).astype(int).flatten()
+    
+    accuracy = accuracy_score(y_test, y_pred)
+    report = classification_report(y_test, y_pred, target_names=['Genuine', 'Forged'])
+    
+    print(f"Accuracy for {person_name}: {accuracy:.4f}")
+    print(f"Classification Report for {person_name}:\n{report}")
+    
+    # Plot accuracy and loss
+    plot_history(history, person_name)
+    
+    # Save the model if required
+    if save_model:
+        model_path = f'model_{person_name}.h5'
+        model.save(model_path)
+        print(f"Model saved to {model_path}")
+    
+    return history, model, {'accuracy': accuracy, 'report': report}
